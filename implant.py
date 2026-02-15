@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # Scanner Implant - Ivan Mladenov
 
-import time
 import asyncio
 import json
 import netifaces
 import netaddr
 import socket
 import struct
+import time
 
 arp_responses = {}
 machines = {}
@@ -28,7 +28,7 @@ def get_inets():
 
         machines[iface] = {}
         machines[iface][str(netaddr.IPAddress(device_inet['addr']))] = {
-                'mac': device_link['addr'], "tcp": {}
+            'mac': device_link['addr'], "tcp": {}
         }
 
         inet = netaddr.IPNetwork(device_inet['addr'])
@@ -73,7 +73,14 @@ async def arp_sender(sock, ips, iface):
 
     for ip in ips:
         new_frame = frame + socket.inet_aton(str(ip))
-        sock.send(new_frame)
+        # shitty fix for blocked socket
+        try:
+            sock.send(new_frame)
+        except:
+            # Blocked socket
+            await asyncio.sleep(0.0001)
+            sock.send(new_frame)
+
         await asyncio.sleep(0)
 
 async def arp_scan():
@@ -89,7 +96,7 @@ async def arp_scan():
     for iface, inet in inets.items():
         sock.bind((iface, 0))
         recv_task = asyncio.create_task(arp_receiver(sock, iface))
-        print('[ARP] Scanning ' + iface)
+        print('\033[1m[ARP]\033[0m Scanning ' + iface)
 
         await arp_sender(sock, inet, iface)
         await asyncio.sleep(1) # poll for last packets
@@ -171,6 +178,7 @@ async def tcp_syn_receiver(sock, iface):
 
 async def tcp_syn_sender(sock, iface):
     for ip in machines[iface].keys():
+        print('Looking for open ports on ' + ip)
         for port in range(65536):
             frame = build_tcp_syn_frame(
                 iface,
@@ -192,7 +200,7 @@ async def tcp_syn_scan():
     for iface in machines.keys():
         sock.bind((iface, 0))
         recv_task = asyncio.create_task(tcp_syn_receiver(sock, iface))
-        print('[TCP SYN] Scanning ' + iface)
+        print('\033[1m[TCP SYN]\033[0m Scanning ' + iface)
 
         await tcp_syn_sender(sock, iface)
         await asyncio.sleep(1) # poll for last packets
@@ -203,8 +211,9 @@ async def tcp_syn_scan():
 
 def tcp_connect_scan():
     for iface in machines.keys():
-        print('[TCP CON] Scanning ' + iface)
+        print('\033[1m[TCP CON]\033[0m Scanning ' + iface)
         for ip, ip_data in machines[iface].items():
+            print('Checking services on open ports for ' + ip)
             for port in ip_data['tcp'].keys():
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                     sock.settimeout(1)
@@ -219,47 +228,55 @@ def tcp_connect_scan():
                         data = sock.recv(1024)
                     except:
                         pass
-                    if b'ssh' in data.lower():
-                        ip_data['tcp'][port] = 'ssh'
-                    elif b'ftp' in data.lower():
-                        ip_data['tcp'][port] = 'ftp'
-                    elif b'0xFF' in data:
-                        ip_data['tcp'][port] = 'telnet'
-                    elif b'echo\n' == data:
-                        ip_data['tcp'][port] = 'echo'
-                    elif b'HTTP' in data:
-                        ip_data['tcp'][port] = 'http' 
+                    ip_data['tcp'][port] = service(data)
                     sock.close()
 
 def local_scan():
     for iface in machines.keys():
-        print('[SELF] Scanning ' + iface)
+        print('\033[1m[SELF]\033[0m Scanning ports for this device on ' + iface)
         host_ip = netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
         for port in range(65536):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.settimeout(1)
+                data = b''
                 result = sock.connect_ex((host_ip, port))
                 if result == 0:
                     machines[iface][host_ip]['tcp'][port] = 'other'
                     try:
                         data = sock.recv(1024)
-                        print(data)
                     except:
                         pass
+                    machines[iface][host_ip]['tcp'][port] = service(data)
+
+                sock.close()
+
+def service(data):
+    if b'ssh' in data.lower():
+        return 'ssh'
+    elif b'ftp' in data.lower():
+        return 'ftp' 
+    elif b'0xff' in data:
+        return 'telnet' 
+    elif b'echo\n' == data:
+        return 'echo' 
+    elif b'http' in data:
+        return 'http' 
+    else:
+        return 'other'
 
 if __name__ == "__main__":
+    start = time.time()
     asyncio.run(arp_scan())
     parse_arp_responses()
-    
     asyncio.run(tcp_syn_scan())
-
     tcp_connect_scan()
     local_scan()
+    end = time.time()
 
     results = {'routers': {}, 'machines': machines}
 
     with open('results.json', 'w') as json_file:
         json.dump(results, json_file, indent=4)
 
-    print('Scan data written to results.json')
+    print('Scan took ' + str(end - start) + ' seconds, data written to results.json')
 
