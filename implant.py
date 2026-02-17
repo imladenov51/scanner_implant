@@ -24,17 +24,19 @@ def get_inets():
 
         arp_responses[iface] = []
 
-        device_inet = netifaces.ifaddresses(iface)[netifaces.AF_INET][0]
-        device_link = netifaces.ifaddresses(iface)[netifaces.AF_LINK][0]
-
         machines[iface] = {}
-        machines[iface][str(netaddr.IPAddress(device_inet['addr']))] = {
-            'mac': device_link['addr'], "tcp": {}
-        }
 
-        inet = netaddr.IPNetwork(device_inet['addr'])
-        inet.netmask = device_inet['netmask']
-        inets[iface] = inet[:-1] # exclude broadcast
+        if netifaces.ifaddresses(iface)[netifaces.AF_INET]:
+            device_inet = netifaces.ifaddresses(iface)[netifaces.AF_INET][0]
+            device_link = netifaces.ifaddresses(iface)[netifaces.AF_LINK][0]
+            
+            machines[iface][str(netaddr.IPAddress(device_inet['addr']))] = {
+                'mac': device_link['addr'], "tcp": {}
+            }
+
+            inet = netaddr.IPNetwork(device_inet['addr'])
+            inet.netmask = device_inet['netmask']
+            inets[iface] = inet[:-1] # exclude broadcast
     
     return inets
         
@@ -66,7 +68,7 @@ async def arp_receiver(sock, iface):
     loop = asyncio.get_running_loop()
 
     while True:
-        data = await loop.sock_recv(sock, 1024)
+        data = await loop.sock_recv(sock, 256)
         arp_responses[iface].append(data)
 
 async def arp_sender(sock, ips, iface):
@@ -125,13 +127,18 @@ def tcp_connect(iface, ip, start, end):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.settimeout(0.001)
             result = sock.connect_ex((ip, port))
-            if result == 0:
-                data = b''
-                try:
-                    data = sock.recv()
-                except:
-                    pass
-                machines[iface][ip]['tcp'][port] = service(data)
+
+            if (not result == 0) or (sock.getsockname() == sock.getpeername()):
+                sock.close()
+                continue
+
+            data = b''
+            sock.send(b'echo\r\n')
+            try:
+                data = sock.recv(256)
+            except:
+                pass
+            machines[iface][ip]['tcp'][port] = service(data)
             sock.close()
 
 def tcp_scan():
@@ -156,9 +163,9 @@ def service(data):
         return 'ssh'
     elif b'ftp' in data.lower():
         return 'ftp' 
-    elif b'0xff' in data:
+    elif b'\xFF' in data:
         return 'telnet' 
-    elif b'echo\n' == data:
+    elif b'echo\r\n' == data:
         return 'echo' 
     elif b'http' in data.lower():
         return 'http' 
